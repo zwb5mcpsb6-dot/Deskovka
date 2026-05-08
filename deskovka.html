@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <title>Karak – webová deskovka (prototyp s inventářem)</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: #111;
+      color: #eee;
+      display: flex;
+      flex-direction: row;
+      gap: 20px;
+      padding: 20px;
+    }
+    #game {
+      display: grid;
+      grid-template-columns: repeat(5, 60px);
+      grid-template-rows: repeat(5, 60px);
+      gap: 4px;
+    }
+    .tile {
+      width: 60px;
+      height: 60px;
+      border-radius: 6px;
+      border: 1px solid #444;
+      background: #222;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      cursor: pointer;
+      box-sizing: border-box;
+    }
+    .tile.revealed {
+      background: #333;
+    }
+    .tile.player-0 { outline: 3px solid #4caf50; }
+    .tile.player-1 { outline: 3px solid #2196f3; }
+    .tile.player-2 { outline: 3px solid #ff9800; }
+    .tile.player-3 { outline: 3px solid #e91e63; }
+
+    #sidebar {
+      min-width: 280px;
+    }
+    #log {
+      height: 260px;
+      overflow-y: auto;
+      background: #181818;
+      padding: 8px;
+      border-radius: 6px;
+      font-size: 13px;
+      border: 1px solid #333;
+    }
+    #controls {
+      margin-top: 10px;
+    }
+    button {
+      background: #444;
+      color: #eee;
+      border: 1px solid #666;
+      padding: 6px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-right: 4px;
+      margin-bottom: 4px;
+    }
+    button:hover {
+      background: #555;
+    }
+    .current {
+      font-weight: bold;
+      color: #ffd54f;
+    }
+    .stat-player {
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="game"></div>
+
+  <div id="sidebar">
+    <h2>Karak – prototyp</h2>
+    <div id="playersConfig">
+      Počet hráčů:
+      <button onclick="startGame(2)">2</button>
+      <button onclick="startGame(3)">3</button>
+      <button onclick="startGame(4)">4</button>
+    </div>
+
+    <h3>Hráči</h3>
+    <div id="playersInfo"></div>
+
+    <h3>Na tahu</h3>
+    <div id="turnInfo"></div>
+
+    <div id="controls">
+      <button onclick="endTurn()">Ukončit tah</button>
+    </div>
+
+    <h3>Log</h3>
+    <div id="log"></div>
+  </div>
+
+<script>
+  const SIZE = 5;
+
+  const TILE_TYPES = {
+    EMPTY: 'empty',     // chodba
+    ENEMY: 'enemy',
+    CHEST: 'chest',
+    DRAGON: 'dragon'
+  };
+
+  let board = [];
+  let players = [];
+  let currentPlayerIndex = 0;
+  let gameStarted = false;
+  let dragonSpawned = false;
+
+  const gameEl = document.getElementById('game');
+  const logEl = document.getElementById('log');
+  const playersInfoEl = document.getElementById('playersInfo');
+  const turnInfoEl = document.getElementById('turnInfo');
+
+  function log(msg) {
+    const p = document.createElement('div');
+    p.textContent = msg;
+    logEl.appendChild(p);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function createEmptyBoard() {
+    board = [];
+    for (let y = 0; y < SIZE; y++) {
+      const row = [];
+      for (let x = 0; x < SIZE; x++) {
+        row.push({
+          revealed: false,
+          type: null,
+          hasPlayers: []
+        });
+      }
+      board.push(row);
+    }
+  }
+
+  function renderBoard() {
+    gameEl.innerHTML = '';
+    for (let y = 0; y < SIZE; y++) {
+      for (let x = 0; x < SIZE; x++) {
+        const tile = board[y][x];
+        const div = document.createElement('div');
+        div.className = 'tile';
+        if (tile.revealed) div.classList.add('revealed');
+
+        tile.hasPlayers.forEach(pIndex => {
+          div.classList.add('player-' + pIndex);
+        });
+
+        if (tile.revealed) {
+          if (tile.type === TILE_TYPES.EMPTY) div.textContent = '';
+          if (tile.type === TILE_TYPES.ENEMY) div.textContent = '👹';
+          if (tile.type === TILE_TYPES.CHEST) div.textContent = '💰';
+          if (tile.type === TILE_TYPES.DRAGON) div.textContent = '🐉';
+        } else {
+          div.textContent = '?';
+        }
+
+        div.onclick = () => onTileClick(x, y);
+        gameEl.appendChild(div);
+      }
+    }
+  }
+
+  function renderPlayers() {
+    playersInfoEl.innerHTML = '';
+    players.forEach((p, i) => {
+      const div = document.createElement('div');
+      div.className = 'stat-player';
+      if (i === currentPlayerIndex) div.classList.add('current');
+      div.textContent =
+        `Hráč ${i + 1} – HP: ${p.hp}, poklady: ${p.treasure}, ` +
+        `zbraň: +${p.weapon || 0}, klíče: ${p.keys}, kouzla: ${p.spells.length}`;
+      playersInfoEl.appendChild(div);
+    });
+
+    const current = players[currentPlayerIndex];
+    turnInfoEl.textContent =
+      `Hráč ${currentPlayerIndex + 1} (HP: ${current.hp}, poklady: ${current.treasure})`;
+  }
+
+  function startGame(numPlayers) {
+    gameStarted = true;
+    dragonSpawned = false;
+    createEmptyBoard();
+
+    const startX = Math.floor(SIZE / 2);
+    const startY = Math.floor(SIZE / 2);
+
+    players = [];
+    for (let i = 0; i < numPlayers; i++) {
+      players.push({
+        x: startX,
+        y: startY,
+        hp: 10,
+        treasure: 0,
+        weapon: null,
+        spells: [],
+        keys: 0
+      });
+    }
+
+    const startTile = board[startY][startX];
+    startTile.revealed = true;
+    startTile.type = TILE_TYPES.EMPTY;
+    startTile.hasPlayers = players.map((_, i) => i);
+
+    currentPlayerIndex = 0;
+    logEl.innerHTML = '';
+    log(`Hra spuštěna pro ${numPlayers} hráče.`);
+    renderBoard();
+    renderPlayers();
+  }
+
+  function onTileClick(x, y) {
+    if (!gameStarted) return;
+
+    const player = players[currentPlayerIndex];
+
+    const dx = Math.abs(player.x - x);
+    const dy = Math.abs(player.y - y);
+    if (dx + dy !== 1) {
+      log('Můžeš se pohnout jen o 1 políčko ortogonálně.');
+      return;
+    }
+
+    movePlayerTo(currentPlayerIndex, x, y);
+  }
+
+  function movePlayerTo(pIndex, x, y) {
+    const player = players[pIndex];
+    const oldTile = board[player.y][player.x];
+    oldTile.hasPlayers = oldTile.hasPlayers.filter(i => i !== pIndex);
+
+    player.x = x;
+    player.y = y;
+
+    const tile = board[y][x];
+    if (!tile.revealed) {
+      revealTile(x, y);
+    }
+
+    tile.hasPlayers.push(pIndex);
+    renderBoard();
+    resolveTile(pIndex, tile);
+    renderPlayers();
+  }
+
+  function revealTile(x, y) {
+    const tile = board[y][x];
+    tile.revealed = true;
+
+    const revealedCount = board.flat().filter(t => t.revealed).length;
+
+    if (!dragonSpawned && revealedCount > 10 && Math.random() < 0.15) {
+      tile.type = TILE_TYPES.DRAGON;
+      dragonSpawned = true;
+    } else {
+      const r = Math.random();
+      if (r < 0.5) tile.type = TILE_TYPES.EMPTY;
+      else if (r < 0.75) tile.type = TILE_TYPES.ENEMY;
+      else tile.type = TILE_TYPES.CHEST;
+    }
+  }
+
+  function resolveTile(pIndex, tile) {
+    const player = players[pIndex];
+
+    if (tile.type === TILE_TYPES.EMPTY) {
+      log(`Hráč ${pIndex + 1} vstoupil do chodby.`);
+      return;
+    }
+
+    if (tile.type === TILE_TYPES.CHEST) {
+      const locked = Math.random() < 0.3; // 30 % šance na zamčenou truhlu
+
+      if (locked) {
+        if (player.keys > 0) {
+          player.keys--;
+          log(`Hráč ${pIndex + 1} otevřel zamčenou truhlu pomocí klíče!`);
+          const loot = getLoot();
+          giveLootToPlayer(player, loot);
+        } else {
+          log(`Truhla je zamčená! Potřebuješ klíč.`);
+          return;
+        }
+      } else {
+        player.treasure++;
+        log(`Hráč ${pIndex + 1} našel poklad!`);
+      }
+
+      tile.type = TILE_TYPES.EMPTY;
+      checkWinCondition();
+      return;
+    }
+
+    if (tile.type === TILE_TYPES.ENEMY) {
+      log(`Hráč ${pIndex + 1} narazil na nepřítele!`);
+      fightEnemy(pIndex, 6, 'nepřítel');
+      tile.type = TILE_TYPES.EMPTY;
+      checkPlayerAlive(pIndex);
+      return;
+    }
+
+    if (tile.type === TILE_TYPES.DRAGON) {
+      log(`🔥 Hráč ${pIndex + 1} narazil na DRaka!`);
+      fightEnemy(pIndex, 12, 'drak');
+      const playerAfter = players[pIndex];
+      if (playerAfter.hp > 0) {
+        log(`🐉 Drak byl poražen! Hráč ${pIndex + 1} vyhrává hru!`);
+        alert(`Hráč ${pIndex + 1} porazil draka a vyhrává!`);
+        gameStarted = false;
+      } else {
+        log(`Hráč ${pIndex + 1} padl v boji s drakem.`);
+      }
+      return;
+    }
+  }
+
+  function fightEnemy(pIndex, enemyHpStart, enemyName) {
+    const player = players[pIndex];
+    let enemyHp = enemyHpStart;
+
+    while (player.hp > 0 && enemyHp > 0) {
+      const rollPlayer = rollD6() + (player.weapon || 0);
+      const rollEnemy = rollD6();
+      log(`Hráč hodil ${rollPlayer}, ${enemyName} hodil ${rollEnemy}.`);
+
+      if (rollPlayer > rollEnemy) {
+        enemyHp -= 2;
+        log(`${enemyName} utrpěl 2 zranění (HP: ${enemyHp}).`);
+      } else if (rollEnemy > rollPlayer) {
+        player.hp -= 2;
+        log(`Hráč utrpěl 2 zranění (HP: ${player.hp}).`);
+      } else {
+        log('Remíza, nikdo neutrpěl zranění.');
+      }
+    }
+
+    if (enemyHp <= 0) {
+      log(`Hráč ${pIndex + 1} porazil ${enemyName}!`);
+      const loot = getLoot();
+      giveLootToPlayer(player, loot);
+    }
+  }
+
+  function getLoot() {
+    const r = Math.random();
+    if (r < 0.4) {
+      return { type: 'weapon', power: Math.floor(Math.random() * 3) + 1 };
+    }
+    if (r < 0.7) {
+      return { type: 'spell', effect: 'fireball', power: 3 };
+    }
+    return { type: 'key' };
+  }
+
+  function giveLootToPlayer(player, loot) {
+    if (loot.type === 'weapon') {
+      player.weapon = loot.power;
+      log(`Získal zbraň (+${loot.power} k útoku).`);
+    }
+    if (loot.type === 'spell') {
+      player.spells.push(loot);
+      log(`Získal kouzlo: Fireball (+${loot.power} dmg – zatím jen do inventáře).`);
+    }
+    if (loot.type === 'key') {
+      player.keys++;
+      log(`Získal klíč!`);
+    }
+    renderPlayers();
+  }
+
+  function rollD6() {
+    return Math.floor(Math.random() * 6) + 1;
+  }
+
+  function checkPlayerAlive(pIndex) {
+    const player = players[pIndex];
+    if (player.hp <= 0) {
+      log(`Hráč ${pIndex + 1} zemřel a vrací se na start s 5 HP.`);
+      const startX = Math.floor(SIZE / 2);
+      const startY = Math.floor(SIZE / 2);
+
+      const tile = board[player.y][player.x];
+      tile.hasPlayers = tile.hasPlayers.filter(i => i !== pIndex);
+
+      player.x = startX;
+      player.y = startY;
+      player.hp = 5;
+
+      const startTile = board[startY][startX];
+      if (!startTile.revealed) {
+        startTile.revealed = true;
+        startTile.type = TILE_TYPES.EMPTY;
+      }
+      startTile.hasPlayers.push(pIndex);
+      renderBoard();
+      renderPlayers();
+    }
+  }
+
+  function checkWinCondition() {
+    const allRevealed = board.flat().every(t => t.revealed);
+    if (allRevealed && gameStarted && dragonSpawned === false) {
+      let best = -1;
+      let winner = null;
+      players.forEach((p, i) => {
+        if (p.treasure > best) {
+          best = p.treasure;
+          winner = i;
+        }
+      });
+      log(`Mapa je celá odhalena. Vyhrává hráč ${winner + 1} s ${best} poklady!`);
+      alert(`Vyhrává hráč ${winner + 1} s ${best} poklady!`);
+      gameStarted = false;
+    }
+  }
+
+  function endTurn() {
+    if (!gameStarted) return;
+    currentPlayerIndex = (currentPlayerIndex + 1) % players.length;
+    log(`Na tahu je nyní hráč ${currentPlayerIndex + 1}.`);
+    renderPlayers();
+  }
+</script>
+
+</body>
+</html>
